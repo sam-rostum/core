@@ -30,6 +30,8 @@ DEFAULT_SSL = False
 DEFAULT_VERIFY_SSL = True
 CONF_WIRELESS_ONLY = "wireless_only"
 DEFAULT_WIRELESS_ONLY = True
+CONF_ARPTABLE_PARSING = "arptable_parsing"
+DEFAULT_ARPTABLE_PARSING = False
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -39,6 +41,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
         vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): cv.boolean,
         vol.Optional(CONF_WIRELESS_ONLY, default=DEFAULT_WIRELESS_ONLY): cv.boolean,
+        vol.Optional(CONF_ARPTABLE_PARSING, default=DEFAULT_ARPTABLE_PARSING): cv.boolean,
     }
 )
 
@@ -62,6 +65,7 @@ class DdWrtDeviceScanner(DeviceScanner):
         self.username = config[CONF_USERNAME]
         self.password = config[CONF_PASSWORD]
         self.wireless_only = config[CONF_WIRELESS_ONLY]
+        self.arptable_parsing = config[CONF_ARPTABLE_PARSING]
 
         self.last_results = {}
         self.mac2name = {}
@@ -134,11 +138,33 @@ class DdWrtDeviceScanner(DeviceScanner):
 
         # The DD-WRT UI uses its own data format and then
         # regex's out values so this is done here too
-        # Remove leading and trailing single quotes.
-        clean_str = active_clients.strip().strip("'")
-        elements = clean_str.split("','")
-
-        self.last_results.extend(item for item in elements if _MAC_REGEX.match(item))
+        if not self.arptable_parsing:
+            # DD-WRT data is in a single array repeating every 5 elements
+            # Remove leading and trailing single quotes
+            # Then treat every arp_table entry as a connected device
+            clean_str = active_clients.strip().strip("'")
+            elements = clean_str.split("','")
+            self.last_results.extend(item for item in elements if _MAC_REGEX.match(item))
+        else:
+            # DD-WRT data is in a single array repeating every 8 elements as follows:
+            # {name,ip,mac,num_connnections,interface,in_bytes,out_bytes,sum_bytes}
+            # Give special attention to stale ARP entries which are still shown in arp_table
+            # but are instead reported as inactive by having zero connections
+            clean_str = active_clients.strip().strip("'")
+            elements = clean_str.replace("', '","','")
+            elements = elements.split("','")
+            num_clients = int(len(elements) / 8)
+            connected_clients = []
+            for idx in range(0, num_clients):
+                mac_index = (idx*8) + 2
+                connections_index = (idx*8) + 3
+                if connections_index < len(elements):
+                    mac = elements[mac_index]
+                    connections = int(elements[connections_index])
+                    if connections > 0:
+                        connected_clients.append(mac)
+            _LOGGER.debug("ARP Table has [%i] clients of which [%i] are connected", num_clients, int(len(connected_clients)))
+            self.last_results.extend(item for item in connected_clients if _MAC_REGEX.match(item))
 
         return True
 
